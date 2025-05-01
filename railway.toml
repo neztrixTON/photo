@@ -1,0 +1,7 @@
+[build]
+  # Устанавливаем зависимости из requirements.txt
+  buildCommand = "pip install -r requirements.txt"
+
+[deploy]
+  # Команда запуска бота
+  startCommand = "python bot.py"
