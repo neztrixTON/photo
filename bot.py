@@ -166,19 +166,19 @@ def format_market_links(urls, page, total):
 # основная логика
 
 def search_by_image(image_path):
-    import requests, re, json
+    import requests, re
     from bs4 import BeautifulSoup
     from html import unescape
     from urllib.parse import urlparse
 
-    # 1) ЗАГРУЗКА КАРТИНКИ
+    # 1) Загрузка картинки на Яндекс
     upload_resp = requests.post(
         'https://yandex.ru/images-apphost/image-download?cbird=111'
         '&images_avatars_size=preview&images_avatars_namespace=images-cbir',
         headers={
-            'accept': '*/*',
-            'accept-language': 'ru,en;q=0.9',
-            'content-type': 'image/jpeg',
+            'Accept': '*/*',
+            'Accept-Language': 'ru,en;q=0.9',
+            'Content-Type': 'image/jpeg',
             'User-Agent': 'Mozilla/5.0'
         },
         data=open(image_path, 'rb')
@@ -190,7 +190,7 @@ def search_by_image(image_path):
     if not cbir_id or not orig:
         return [], []
 
-    # 2) ЗАПРОС СТРАНИЦЫ «sites»
+    # 2) Запрос страницы «sites»
     search_resp = requests.get(
         'https://yandex.ru/images/search',
         params={
@@ -200,8 +200,8 @@ def search_by_image(image_path):
             'url': orig
         },
         headers={
-            'accept': 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.8',
-            'accept-language': 'ru,en;q=0.9',
+            'Accept': 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'ru,en;q=0.9',
             'User-Agent': 'Mozilla/5.0'
         }
     )
@@ -209,15 +209,15 @@ def search_by_image(image_path):
     soup = BeautifulSoup(search_resp.text, 'html.parser')
     links = []
 
-    # 3) ВЫХВАТЫВАЕМ ВСЕ URL ИЗ «сырых» data-state
+    # 3) Грубый regex-фоллбэк по содержимому data-state
     div = soup.select_one('div.Root[data-state]')
     if div:
         raw = unescape(div['data-state'])
-        # regex-фоллбэк по чистой строке
-        for url in re.findall(r'https?://[^\s"\'<>]+', raw):
-            links.append(url)
+        # достаем всё, что похоже на URL
+        found = re.findall(r'https?://[^\s"\'<>]+', raw)
+        links.extend(found)
 
-    # 4) HTML-фоллбэк
+    # 4) Фоллбэк через HTML-селекторы
     for info in soup.select('.CbirSites-ItemInfo'):
         a = info.select_one('.CbirSites-ItemDomain a')
         url = a['href'] if a and a.has_attr('href') else None
@@ -227,7 +227,7 @@ def search_by_image(image_path):
         if url:
             links.append(url)
 
-    # 5) ФИЛЬТРАЦИЯ И ДЕДУП
+    # 5) Фильтрация и дедупликация
     SKIP_DOMAINS = [
         'avatars.mds.yandex.net',
         'yastatic.net',
@@ -243,9 +243,10 @@ def search_by_image(image_path):
         if re.search(r'\.(css|js|jpe?g|png|webp|gif)(?:$|\?)', u.lower()):
             continue
         clean.append(u)
-    unique = list(dict.fromkeys(clean))  # порядок + уникальность
+    # удаляем дубли, сохраняя порядок
+    unique = list(dict.fromkeys(clean))
 
-    # 6) МАРКЕТПЛЕЙСЫ
+    # 6) Выделяем маркетплейсы
     MARKET_DOMAINS = {
         'ozon.ru': 'Ozon',
         'megamarket.ru': 'Megamarket',
