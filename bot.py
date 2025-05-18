@@ -180,12 +180,11 @@ def format_market_links(urls, page, total):
 def search_by_image(image_path):
     import requests, re
     from bs4 import BeautifulSoup
-    from urllib.parse import quote_plus, urlparse
+    from urllib.parse import quote, urlparse
 
-    # 1) Загрузить картинку и получить cbir_id + orig URL
-    up = requests.post(
-        'https://yandex.ru/images-apphost/image-download'
-        '?cbird=111&images_avatars_size=preview&images_avatars_namespace=images-cbir',
+    # Загружаем картинку на Yandex
+    resp = requests.post(
+        'https://yandex.ru/images-apphost/image-download?cbird=111&images_avatars_size=preview&images_avatars_namespace=images-cbir',
         headers={
             'Accept': '*/*',
             'Accept-Language': 'ru,en;q=0.9',
@@ -194,83 +193,62 @@ def search_by_image(image_path):
         },
         data=open(image_path, 'rb')
     )
-    up.raise_for_status()
-    uj = up.json()
-    cbir_id = uj.get('cbir_id')
-    orig    = uj.get('sizes', {}).get('orig', {}).get('path')
-    if not cbir_id or not orig:
+    resp.raise_for_status()
+    data = resp.json()
+
+    cbir_id = data.get('cbir_id')
+    orig_path = data.get('sizes', {}).get('orig', {}).get('path')
+    if not cbir_id or not orig_path:
         return [], []
 
-    # 2) Собираем правильный URL для запроса
-    #    примеры:
-    #    https://yandex.ru/images/search?
-    #       cbir_id=12345%2Fabcdef&
-    #       rpt=imageview&
-    #       url=https%3A%2F%2Favatars.mds.yandex.net%2Fget-images-cbir%2F12345%2Fabcdef%2Forig&
-    #       cbir_page=sites
-    params = {
-        'cbir_id':    cbir_id,
-        'rpt':        'imageview',
-        'url':        orig,
-        'cbir_page':  'sites'
-    }
-    resp = requests.get(
-        'https://yandex.ru/images/search',
-        params=params,
+    # Собираем корректную ссылку
+    search_url = (
+        "https://yandex.ru/images/search?"
+        f"cbir_id={quote(cbir_id)}"
+        "&rpt=imageview"
+        f"&url={quote(orig_path)}"
+        "&cbir_page=sites"
+    )
+
+    # Получаем HTML
+    html_resp = requests.get(
+        search_url,
         headers={
-            'Accept': 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.8',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                          'AppleWebKit/537.36 (KHTML, like Gecko) '
+                          'Chrome/113.0.0.0 Safari/537.36 YaBrowser/23.5.0.0',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
             'Accept-Language': 'ru,en;q=0.9',
-            'User-Agent': 'Mozilla/5.0'
+            'Referer': 'https://yandex.ru/images/',
         }
     )
-    resp.raise_for_status()
+    html_resp.raise_for_status()
+    soup = BeautifulSoup(html_resp.text, 'html.parser')
 
-    # 3) Парсим HTML и собираем все ссылки из <li class="CbirSites-Item">
-    soup = BeautifulSoup(resp.text, 'html.parser')
-    items = soup.select('li.CbirSites-Item')
-    raw_links = []
-    for li in items:
-        # сначала пробуем домен-линк
-        dom = li.select_one('.CbirSites-ItemDomain a')
-        if dom and dom.has_attr('href'):
-            raw_links.append(dom['href'])
-            continue
-        # иначе берём заголовок
-        tit = li.select_one('.CbirSites-ItemTitle a')
-        if tit and tit.has_attr('href'):
-            raw_links.append(tit['href'])
+    # Парсим ссылки из блоков с сайтами
+    results = []
+    for item in soup.select('.CbirSites-ItemInfo'):
+        a = item.select_one('.CbirSites-ItemDomain a') or item.select_one('.CbirSites-ItemTitle a')
+        if a and a.has_attr('href'):
+            url = a['href']
+            netloc = urlparse(url).netloc
+            if any(skip in netloc for skip in SKIP_DOMAINS):
+                continue
+            if re.search(r'\.(css|js|jpe?g|png|webp|gif)(?:$|\?)', url.lower()):
+                continue
+            results.append(url)
 
-    # 4) Фильтрация и дедуп
-    SKIP = [
-        'avatars.mds.yandex.net', 'yastatic.net',
-        'info-people.com', 'yandex.ru/support/images',
-        'passport.yandex.ru'
+    # Уникальные
+    unique = list(dict.fromkeys(results))
+
+    # Маркетплейсы
+    market_links = [
+        u for u in unique
+        if any(urlparse(u).netloc.endswith(k) for k in MARKET_DOMAINS)
     ]
-    clean = []
-    for u in raw_links:
-        net = urlparse(u).netloc
-        # пропускаем мусорные домены
-        if any(skip in net for skip in SKIP):
-            continue
-        # пропускаем ссылки на картинки/скрипты
-        if re.search(r'\.(css|js|jpe?g|png|webp|gif)(?:$|\?)', u.lower()):
-            continue
-        clean.append(u)
-    unique = list(dict.fromkeys(clean))
 
-    # 5) Отдельно маркетплейсы
-    MARKET = {
-        'ozon.ru': 'Ozon',
-        'megamarket.ru': 'Megamarket',
-        'wildberries.ru': 'Wb',
-        'wb.ru': 'Wb',
-        'market.yandex.ru': 'Yandex Market',
-        'market.ya.ru': 'Yandex Market',
-    }
-    market = [u for u in unique
-              if any(urlparse(u).netloc.endswith(k) for k in MARKET)]
+    return unique, market_links
 
-    return unique, market
 
 
 # Точка входа
