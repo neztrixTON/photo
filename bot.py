@@ -177,94 +177,101 @@ def format_market_links(urls, page, total):
         lines.append(f"{i}. 🔗 <a href=\"{url}\">{url}</a> ({name})")
     return header + "\n".join(lines)
 
-# Новая логика поиска по изображению
 def search_by_image(image_path):
-    # 1) Загрузить изображение, получить cbir_id и orig URL
+    import requests, re
+    from bs4 import BeautifulSoup
+    from urllib.parse import quote_plus, urlparse
+
+    # 1) Загрузить картинку и получить cbir_id + orig URL
     up = requests.post(
-        YANDEX_UPLOAD_URL,
+        'https://yandex.ru/images-apphost/image-download'
+        '?cbird=111&images_avatars_size=preview&images_avatars_namespace=images-cbir',
         headers={
-            'Accept':'*/*','Accept-Language':'ru,en;q=0.9',
-            'Content-Type':'image/jpeg','User-Agent':'Mozilla/5.0'
+            'Accept': '*/*',
+            'Accept-Language': 'ru,en;q=0.9',
+            'Content-Type': 'image/jpeg',
+            'User-Agent': 'Mozilla/5.0'
         },
-        data=open(image_path,'rb')
+        data=open(image_path, 'rb')
     )
     up.raise_for_status()
     uj = up.json()
     cbir_id = uj.get('cbir_id')
-    orig = uj.get('sizes', {}).get('orig', {}).get('path')
+    orig    = uj.get('sizes', {}).get('orig', {}).get('path')
     if not cbir_id or not orig:
         return [], []
 
-    all_links = []
-    market_links = []
+    # 2) Собираем правильный URL для запроса
+    #    примеры:
+    #    https://yandex.ru/images/search?
+    #       cbir_id=12345%2Fabcdef&
+    #       rpt=imageview&
+    #       url=https%3A%2F%2Favatars.mds.yandex.net%2Fget-images-cbir%2F12345%2Fabcdef%2Forig&
+    #       cbir_page=sites
     params = {
-        'cbir_id': cbir_id,
-        'cbir_page': 'sites',
-        'rpt': 'imageview',
-        'url': orig
+        'cbir_id':    cbir_id,
+        'rpt':        'imageview',
+        'url':        orig,
+        'cbir_page':  'sites'
     }
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    resp = requests.get(
+        'https://yandex.ru/images/search',
+        params=params,
+        headers={
+            'Accept': 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'ru,en;q=0.9',
+            'User-Agent': 'Mozilla/5.0'
+        }
+    )
+    resp.raise_for_status()
 
-    cursor = None
-    while True:
-        # AJAX‐скролл: если есть cursor, добавляем в запрос
-        if cursor:
-            params['cursor'] = cursor
-            params['forest'] = '1'
-
-        resp = requests.get(YANDEX_SEARCH_URL, params=params, headers=headers)
-        resp.raise_for_status()
-
-        content_type = resp.headers.get('Content-Type', '')
-        if 'application/json' in content_type:
-            data = resp.json()
-            html = data.get('html', '')
-            cursor = data.get('cursor')
-        else:
-            html = resp.text
-            cursor = None  # первый HTML‐ответ
-
-        soup = BeautifulSoup(html, 'html.parser')
-
-        # 2) Из data-state «Root» вынимаем все URL
-        div = soup.select_one('div.Root[data-state]')
-        if div:
-            state = unescape(div['data-state'])
-            found = re.findall(r'https?://[^\s"\'<>]+', state)
-            all_links.extend(found)
-
-        # 3) Фоллбэк по элементам HTML
-        for info in soup.select('.CbirSites-ItemInfo'):
-            a_dom = info.select_one('.CbirSites-ItemDomain a')
-            url = a_dom['href'] if a_dom and a_dom.has_attr('href') else None
-            if not url:
-                a_title = info.select_one('.CbirSites-ItemTitle a')
-                url = a_title['href'] if a_title and a_title.has_attr('href') else None
-            if url:
-                all_links.append(url)
-
-        # Если курсор отсутствует или нет нового набора — выходим
-        if not cursor:
-            break
-
-    # 4) Фильтрация, дедуп
-    clean = []
-    for u in all_links:
-        net = urlparse(u).netloc
-        if any(skip in net for skip in SKIP_DOMAINS):
+    # 3) Парсим HTML и собираем все ссылки из <li class="CbirSites-Item">
+    soup = BeautifulSoup(resp.text, 'html.parser')
+    items = soup.select('li.CbirSites-Item')
+    raw_links = []
+    for li in items:
+        # сначала пробуем домен-линк
+        dom = li.select_one('.CbirSites-ItemDomain a')
+        if dom and dom.has_attr('href'):
+            raw_links.append(dom['href'])
             continue
+        # иначе берём заголовок
+        tit = li.select_one('.CbirSites-ItemTitle a')
+        if tit and tit.has_attr('href'):
+            raw_links.append(tit['href'])
+
+    # 4) Фильтрация и дедуп
+    SKIP = [
+        'avatars.mds.yandex.net', 'yastatic.net',
+        'info-people.com', 'yandex.ru/support/images',
+        'passport.yandex.ru'
+    ]
+    clean = []
+    for u in raw_links:
+        net = urlparse(u).netloc
+        # пропускаем мусорные домены
+        if any(skip in net for skip in SKIP):
+            continue
+        # пропускаем ссылки на картинки/скрипты
         if re.search(r'\.(css|js|jpe?g|png|webp|gif)(?:$|\?)', u.lower()):
             continue
         clean.append(u)
     unique = list(dict.fromkeys(clean))
 
-    # 5) Маркетплейсы
-    for u in unique:
-        net = urlparse(u).netloc
-        if any(net.endswith(k) for k in MARKET_DOMAINS):
-            market_links.append(u)
+    # 5) Отдельно маркетплейсы
+    MARKET = {
+        'ozon.ru': 'Ozon',
+        'megamarket.ru': 'Megamarket',
+        'wildberries.ru': 'Wb',
+        'wb.ru': 'Wb',
+        'market.yandex.ru': 'Yandex Market',
+        'market.ya.ru': 'Yandex Market',
+    }
+    market = [u for u in unique
+              if any(urlparse(u).netloc.endswith(k) for k in MARKET)]
 
-    return unique, market_links
+    return unique, market
+
 
 # Точка входа
 if __name__ == '__main__':
