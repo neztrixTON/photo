@@ -9,14 +9,13 @@ from bs4 import BeautifulSoup
 from telegram import Update, InputFile
 from telegram.constants import ChatAction
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler, CallbackContext,
-    filters
+    Application, CommandHandler, MessageHandler, filters, ContextTypes
 )
 
 # Enable detailed logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.DEBUG
 )
 logger = logging.getLogger(__name__)
 
@@ -41,12 +40,12 @@ MARKET_DOMAINS = {
     'market.yandex.ru': 'Yandex Market', 'market.ya.ru': 'Yandex Market'
 }
 
-async def start(update: Update, context: CallbackContext):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         'Привет! Отправь мне картинку, и я найду сайты, где она встречалась.'
     )
 
-async def handle_photo(update: Update, context: CallbackContext):
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(
         chat_id=update.effective_chat.id,
         action=ChatAction.TYPING
@@ -63,6 +62,15 @@ async def handle_photo(update: Update, context: CallbackContext):
         await update.message.reply_text('Не удалось получить cbir_id от Yandex.')
         return
 
+    # Log the parameters
+    search_params = {
+        'cbir_id': cbir_id,
+        'rpt': 'imageview',
+        'url': orig,
+        'cbir_page': 'sites'
+    }
+    logger.info('Performing Yandex search with params: %s', search_params)
+
     # Search by image
     all_links, market_links = search_by_image(cbir_id, orig)
     if not all_links:
@@ -70,10 +78,7 @@ async def handle_photo(update: Update, context: CallbackContext):
         return
 
     # Prepare message
-    text = 'Найденные сайты:\n'
-    for url in all_links:
-        text += f'- {url}\n'
-
+    text = 'Найденные сайты:\n' + '\n'.join(f'- {url}' for url in all_links)
     await update.message.reply_text(text)
 
     # Optionally send marketplace separately
@@ -122,7 +127,11 @@ def search_by_image(cbir_id: str, orig: str):
         'url': orig,
         'cbir_page': 'sites'
     }
-    resp = requests.get(YANDEX_SEARCH_URL, params=params, headers={
+    # Construct request URL for logging
+    request_url = requests.Request('GET', YANDEX_SEARCH_URL, params=params).prepare().url
+    logger.info('Searching URL: %s', request_url)
+
+    resp = requests.get(request_url, headers={
         'Accept': 'text/html,application/xhtml+xml,*/*;q=0.9',
         'Accept-Language': 'ru,en;q=0.9',
         'User-Agent': 'Mozilla/5.0'
