@@ -171,53 +171,46 @@ def search_by_image(image_path):
     from html import unescape
     from urllib.parse import urlparse
 
-    # 1) Загрузка картинки на Яндекс
-    upload_resp = requests.post(
+    # 1) Заливка картинки
+    up = requests.post(
         'https://yandex.ru/images-apphost/image-download?cbird=111'
         '&images_avatars_size=preview&images_avatars_namespace=images-cbir',
         headers={
-            'Accept': '*/*',
-            'Accept-Language': 'ru,en;q=0.9',
-            'Content-Type': 'image/jpeg',
-            'User-Agent': 'Mozilla/5.0'
+            'Accept':'*/*','Accept-Language':'ru,en;q=0.9',
+            'Content-Type':'image/jpeg','User-Agent':'Mozilla/5.0'
         },
-        data=open(image_path, 'rb')
+        data=open(image_path,'rb')
     )
-    upload_resp.raise_for_status()
-    upload_json = upload_resp.json()
-    cbir_id = upload_json.get('cbir_id')
-    orig = upload_json.get('sizes', {}).get('orig', {}).get('path')
+    up.raise_for_status()
+    uj = up.json()
+    cbir_id = uj.get('cbir_id')
+    orig = uj.get('sizes',{}).get('orig',{}).get('path')
     if not cbir_id or not orig:
         return [], []
 
-    # 2) Запрос страницы «sites»
-    search_resp = requests.get(
+    # 2) Запрос sites
+    sr = requests.get(
         'https://yandex.ru/images/search',
         params={
-            'cbir_id': cbir_id,
-            'cbir_page': 'sites',
-            'rpt': 'imageview',
-            'url': orig
+            'cbir_id':cbir_id,'cbir_page':'sites',
+            'rpt':'imageview','url':orig
         },
         headers={
-            'Accept': 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'ru,en;q=0.9',
-            'User-Agent': 'Mozilla/5.0'
+            'Accept':'text/html,application/xhtml+xml;q=0.9,*/*;q=0.8',
+            'Accept-Language':'ru,en;q=0.9','User-Agent':'Mozilla/5.0'
         }
     )
-    search_resp.raise_for_status()
-    soup = BeautifulSoup(search_resp.text, 'html.parser')
+    sr.raise_for_status()
+    soup = BeautifulSoup(sr.text,'html.parser')
     links = []
 
-    # 3) Грубый regex-фоллбэк по содержимому data-state
+    # 3) Regex по data-state
     div = soup.select_one('div.Root[data-state]')
     if div:
         raw = unescape(div['data-state'])
-        # достаем всё, что похоже на URL
-        found = re.findall(r'https?://[^\s"\'<>]+', raw)
-        links.extend(found)
+        links.extend(re.findall(r'https?://[^\s"\'<>]+', raw))
 
-    # 4) Фоллбэк через HTML-селекторы
+    # 4) HTML-фоллбэк
     for info in soup.select('.CbirSites-ItemInfo'):
         a = info.select_one('.CbirSites-ItemDomain a')
         url = a['href'] if a and a.has_attr('href') else None
@@ -227,38 +220,29 @@ def search_by_image(image_path):
         if url:
             links.append(url)
 
-    # 5) Фильтрация и дедупликация
-    SKIP_DOMAINS = [
-        'avatars.mds.yandex.net',
-        'yastatic.net',
-        'info-people.com',
-        'yandex.ru/support/images',
-        'passport.yandex.ru',
+    # 5) Фильтрация и дедуп
+    SKIP = [
+        'avatars.mds.yandex.net','yastatic.net',
+        'info-people.com','yandex.ru/support/images',
+        'passport.yandex.ru'
     ]
     clean = []
     for u in links:
         net = urlparse(u).netloc
-        if any(skip in net for skip in SKIP_DOMAINS):
-            continue
-        if re.search(r'\.(css|js|jpe?g|png|webp|gif)(?:$|\?)', u.lower()):
+        if any(skip in net for skip in SKIP): continue
+        if re.search(r'\.(css|js|jpe?g|png|webp|gif)(?:$|\?)',u.lower()):
             continue
         clean.append(u)
-    # удаляем дубли, сохраняя порядок
     unique = list(dict.fromkeys(clean))
 
-    # 6) Выделяем маркетплейсы
-    MARKET_DOMAINS = {
-        'ozon.ru': 'Ozon',
-        'megamarket.ru': 'Megamarket',
-        'wildberries.ru': 'Wb',
-        'wb.ru': 'Wb',
-        'market.yandex.ru': 'Yandex Market',
-        'market.ya.ru': 'Yandex Market',
+    # 6) Маркетплейсы
+    MARKET = {
+        'ozon.ru':'Ozon','megamarket.ru':'Megamarket',
+        'wildberries.ru':'Wb','wb.ru':'Wb',
+        'market.yandex.ru':'Yandex Market',
+        'market.ya.ru':'Yandex Market'
     }
-    market = [
-        u for u in unique
-        if any(urlparse(u).netloc.endswith(key) for key in MARKET_DOMAINS)
-    ]
+    market = [u for u in unique if any(urlparse(u).netloc.endswith(k) for k in MARKET)]
 
     return unique, market
 
