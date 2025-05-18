@@ -1,3 +1,4 @@
+
 import logging
 import tempfile
 import requests
@@ -70,10 +71,12 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo = await update.message.photo[-1].get_file()
     with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tf:
         await photo.download_to_drive(tf.name)
+        image_path = tf.name
     try:
-        all_links, market_links = search_by_image(tf.name)
+        all_links, market_links = search_by_image(image_path)
+        logger.info(f"Найдено {len(all_links)} общих, {len(market_links)} маркетплейсов")
     except Exception as e:
-        logger.error(f"Search error: {e}")
+        logger.exception("Ошибка в search_by_image:")
         all_links, market_links = [], []
     context.user_data.update({
         'all_links': all_links,
@@ -122,128 +125,114 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['mode'] = 'all' if data=='show_all' else 'market'
     elif data in ['prev','next']:
         mode = context.user_data['mode']
-        key = f'page_{mode}'
-        context.user_data[key] += 1 if data=='next' else -1
+        context.user_data[f'page_{mode}'] += 1 if data=='next' else -1
     elif data=='save_excel':
         await save_excel(update, context)
         return
     await display_links(update, context)
 
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.error("Exception while handling an update:", exc_info=context.error)
+async def error_handler(update, context):
+    logger.exception("Ошибка обработки:")
 
+# помощники
 
 def build_keyboard(page, total):
-    buttons = []
-    nav = []
+    buttons=[]; nav=[]
     if page>0: nav.append(InlineKeyboardButton('⬅️ Назад', callback_data='prev'))
     if (page+1)*RESULTS_PER_PAGE<total: nav.append(InlineKeyboardButton('Вперёд ➡️', callback_data='next'))
     if nav: buttons.append(nav)
     buttons.append([
         InlineKeyboardButton('Общие результаты', callback_data='show_all'),
-        InlineKeyboardButton('Маркетплейсы', callback_data='show_market'),
+        InlineKeyboardButton('Маркетплейсы', callback_data='show_market')
     ])
-    buttons.append([InlineKeyboardButton('💾 Сохранить в Excel', callback_data='save_excel')])
+    buttons.append([InlineKeyboardButton('💾 В Excel', callback_data='save_excel')])
     return InlineKeyboardMarkup(buttons)
 
-
 def format_links(urls, page, total):
-    header = f"🖼 Страница {page+1}/{(total-1)//RESULTS_PER_PAGE+1}\n"
-    lines = [f"{i}. 🔗 <a href=\"{url}\">Ссылка {i}</a>" for i, url in enumerate(urls, start=page*RESULTS_PER_PAGE+1)]
-    return header + "\n".join(lines)
+    header=f"🖼 Страница {page+1}/{(total-1)//RESULTS_PER_PAGE+1}\n"
+    return header+"\n".join(
+        f"{i}. 🔗 <a href=\"{url}\">{url}</a>"
+        for i,url in enumerate(urls, start=page*RESULTS_PER_PAGE+1)
+    )
 
 def format_market_links(urls, page, total):
-    header = f"🛒 Маркетплейсы {page+1}/{(total-1)//RESULTS_PER_PAGE+1}\n"
-    lines = []
-    for i, url in enumerate(urls, start=page*RESULTS_PER_PAGE+1):
-        domain = urlparse(url).netloc
-        name = next((label for key, label in MARKET_DOMAINS.items() if domain.endswith(key)), domain)
-        lines.append(f"{i}. 🔗 <a href=\"{url}\">Ссылка {i}</a> ({name})")
-    return header + "\n".join(lines)
+    header=f"🛒 Маркетплейсы {page+1}/{(total-1)//RESULTS_PER_PAGE+1}\n"
+    lines=[]
+    for i,url in enumerate(urls, start=page*RESULTS_PER_PAGE+1):
+        name=next((lbl for k,lbl in MARKET_DOMAINS.items() if urlparse(url).netloc.endswith(k)), urlparse(url).netloc)
+        lines.append(f"{i}. 🔗 <a href=\"{url}\">{url}</a> ({name})")
+    return header+"\n".join(lines)
 
+# основная логика
 
 def search_by_image(image_path):
-    logger.debug("=== Поиск по изображению ===")
-    logger.debug("1) Загрузка картинки на Yandex")
+    logger.debug("=== search_by_image ===")
+    # 1) upload
+    logger.debug("Upload to Yandex")
     with open(image_path,'rb') as f:
-        resp = requests.post(YANDEX_UPLOAD_URL, headers=HEADERS_UPLOAD, data=f)
-    resp.raise_for_status()
-    data = resp.json()
-    cbir_id = data.get('cbir_id')
-    orig = data.get('sizes',{}).get('orig',{}).get('path')
-    if not cbir_id or not orig:
-        logger.debug("Не получили cbir_id или orig")
-        return [], []
+        r=requests.post(YANDEX_UPLOAD_URL, headers=HEADERS_UPLOAD, data=f)
+    r.raise_for_status(); data=r.json()
+    logger.debug(f"Upload JSON: {data}")
+    cbir_id=data.get('cbir_id'); orig=data.get('sizes',{}).get('orig',{}).get('path')
+    if not cbir_id or not orig: return [],[]
 
-    logger.debug(f"2) Получение HTML для cbir_id={cbir_id}")
-    params = {
-        'cbir_id': cbir_id,
-        'cbir_page': 'sites',
-        'rpt': 'imageview',
-        'url': orig,
-    }
-    resp = requests.get(YANDEX_SEARCH_URL, params=params, headers={'User-Agent': HEADERS_UPLOAD['User-Agent']})
-    resp.raise_for_status()
-    html = resp.text
-    logger.debug(f"Получили HTML длиной {len(html)}")
+    # 2) get HTML
+    r=requests.get(YANDEX_SEARCH_URL, params={
+        'cbir_id':cbir_id,'cbir_page':'sites','rpt':'imageview','url':orig
+    }, headers={'User-Agent':HEADERS_UPLOAD['User-Agent']})
+    r.raise_for_status(); html=r.text
+    logger.debug(f"HTML len {len(html)}")
+    soup=BeautifulSoup(html,'html.parser')
 
-    soup = BeautifulSoup(html, 'html.parser')
-    links = []
-
-    logger.debug("3) Парсим JSON из data-state")
-    root_div = soup.select_one('div.Root[data-state]')
-    if root_div:
-        from html import unescape
-        state_raw = unescape(root_div['data-state'])
-        logger.debug(f"Raw data-state JSON length: {len(state_raw)}")
+    # 3) parse data-state
+    links=[]
+    root=soup.select_one('div.Root[data-state]')
+    if root:
+        raw=root['data-state']
+        logger.debug(f"data-state len {len(raw)}")
+        # try JSON -> state['sites']
         try:
-            state = json.loads(state_raw)
-            sites = state.get('cbirSitesList', {}).get('sites', [])
-            logger.debug(f"Найдено {len(sites)} элементов в cbirSitesList['sites']")
-            for item in sites:
-                url = item.get('url') or item.get('link')
-                if url and url not in links:
-                    links.append(url)
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON parse error: {e}")
-
-    logger.debug("4) HTML-фоллбэк по селекторам .CbirSites-ItemInfo")
+            state=json.loads(raw)
+            items= state.get('sites') or state.get('cbirSitesList',{}).get('sites') or []
+            logger.debug(f"Parsed JSON items {len(items)}")
+            for it in items:
+                url=it.get('url') or it.get('link')
+                if url: links.append(url)
+        except Exception:
+            logger.debug("JSON parse failed, fallback regex")
+        # regex fallback to catch any URLs
+        found=re.findall(r'https?://[^"\\]+' , raw)
+        for url in found:
+            if url not in links:
+                links.append(url)
+    # 4) HTML fallback
     for info in soup.select('.CbirSites-ItemInfo'):
-        a_dom = info.select_one('.CbirSites-ItemDomain a')
-        url = a_dom['href'] if a_dom and a_dom.has_attr('href') else None
+        a=info.select_one('.CbirSites-ItemDomain a')
+        url=a['href'] if a and a.has_attr('href') else None
         if not url:
-            a_title = info.select_one('.CbirSites-ItemTitle a')
-            url = a_title['href'] if a_title and a_title.has_attr('href') else None
-        if url and url not in links:
-            links.append(url)
-    logger.debug(f"После фоллбэка всего ссылок: {len(links)}")
+            t=info.select_one('.CbirSites-ItemTitle a')
+            url=t['href'] if t and t.has_attr('href') else None
+        if url: links.append(url)
 
-    logger.debug("5) Фильтрация доменов и расширений")
-    clean = []
-    for link in links:
-        domain = urlparse(link).netloc
-        if any(skip in domain for skip in SKIP_DOMAINS): continue
-        if re.search(r"\.(css|js|jpg|jpeg|png|webp|gif)(?:$|\?)", link.lower()): continue
-        clean.append(link)
-    unique = []
-    seen = set()
-    for link in clean:
-        if link not in seen:
-            seen.add(link)
-            unique.append(link)
-    market = [l for l in unique if any(urlparse(l).netloc.endswith(key) for key in MARKET_DOMAINS)]
-
-    logger.info(f"Найдено {len(unique)} общих ссылок, {len(market)} на маркетплейсы")
+    # 5) filter & dedupe
+    clean=[]
+    for l in links:
+        d=urlparse(l).netloc
+        if any(sd in d for sd in SKIP_DOMAINS): continue
+        if re.search(r'\.(css|js|jpg|jpeg|png|webp|gif)(?:$|\?)',l.lower()): continue
+        clean.append(l)
+    unique=[]; seen=set()
+    for l in clean:
+        if l not in seen: seen.add(l); unique.append(l)
+    market=[l for l in unique if any(urlparse(l).netloc.endswith(k) for k in MARKET_DOMAINS)]
     return unique, market
 
 
-def main():
-    application = Application.builder().token('8037946874:AAFt8VjAfy-UpTXF-XoJUYPiNlC7B-btUms').build()
-    application.add_handler(CommandHandler('start', start))
-    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    application.add_handler(CallbackQueryHandler(button_callback))
-    application.add_error_handler(error_handler)
-    application.run_polling()
-
 if __name__=='__main__':
-    main()
+    app=Application.builder().token('8037946874:AAFt8VjAfy-UpTXF-XoJUYPiNlC7B-btUms').build()
+    app.add_handler(CommandHandler('start',start))
+    app.add_handler(MessageHandler(filters.PHOTO,handle_photo))
+    app.add_handler(CallbackQueryHandler(button_callback))
+    app.add_error_handler(error_handler)
+    app.run_polling()
+
