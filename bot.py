@@ -169,8 +169,10 @@ def format_market_links(urls, page, total):
 
 # CORE SEARCH FUNCTION
 def search_by_image(image_path):
+    import json
     from html import unescape
 
+    # 1) загрузка изображения
     with open(image_path, 'rb') as f:
         resp = requests.post(YANDEX_UPLOAD_URL, headers=HEADERS_UPLOAD, data=f)
     resp.raise_for_status()
@@ -180,6 +182,7 @@ def search_by_image(image_path):
     if not cbir_id or not orig:
         return [], []
 
+    # 2) получение HTML страницы «sites»
     params = {
         'cbir_id': cbir_id,
         'cbir_page': 'sites',
@@ -192,16 +195,19 @@ def search_by_image(image_path):
 
     links = []
 
-    # Новый способ — извлечение ссылок из script с JSON
-    for script in soup.find_all('script'):
-        if script.string and 'serp-item' in script.string:
-            matches = re.findall(r'"url":"(https?://[^"]+)"', script.string)
-            for url in matches:
-                url = unescape(url)
-                if url not in links:
+    # 3) Новый: парсим JSON из data-state атрибута <div class="Root" …>
+    root = soup.select_one('div.Root[data-state]')
+    if root:
+        try:
+            state = json.loads(unescape(root['data-state']))
+            for item in state.get('sites', []):
+                url = item.get('url') or item.get('link')
+                if url and url not in links:
                     links.append(url)
+        except json.JSONDecodeError:
+            pass
 
-    # Старый способ — HTML fallback
+    # 4) Фоллбэк через HTML (на всякий случай)
     for info in soup.select('.CbirSites-ItemInfo'):
         a_dom = info.select_one('.CbirSites-ItemDomain a')
         if a_dom and a_dom.has_attr('href'):
@@ -212,7 +218,7 @@ def search_by_image(image_path):
         if url and url not in links:
             links.append(url)
 
-    # Фильтрация
+    # 5) фильтрация по доменам, расширениям и дубли
     clean = []
     for link in links:
         domain = urlparse(link).netloc
@@ -222,15 +228,15 @@ def search_by_image(image_path):
             continue
         clean.append(link)
 
-    seen = set()
-    unique = []
+    seen = set(); unique = []
     for link in clean:
         if link not in seen:
-            seen.add(link)
-            unique.append(link)
+            seen.add(link); unique.append(link)
 
+    # 6) маркетплейсы
     market = [l for l in unique if any(urlparse(l).netloc.endswith(key) for key in MARKET_DOMAINS)]
     return unique, market
+
 
 def main():
     application = Application.builder().token('8037946874:AAFt8VjAfy-UpTXF-XoJUYPiNlC7B-btUms').build()
