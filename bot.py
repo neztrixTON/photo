@@ -166,12 +166,19 @@ def format_market_links(urls, page, total):
 # основная логика
 
 def search_by_image(image_path):
-    import json
+    import requests, json, re
+    from bs4 import BeautifulSoup
     from html import unescape
+    from urllib.parse import urlparse
 
-    # 1) upload
-    with open(image_path,'rb') as f:
-        resp = requests.post(YANDEX_UPLOAD_URL, headers=HEADERS_UPLOAD, data=f)
+    # 1. Загрузка
+    resp = requests.post(
+        'https://yandex.ru/images-apphost/image-download?cbird=111'
+        '&images_avatars_size=preview&images_avatars_namespace=images-cbir',
+        headers={'accept':'*/*','accept-language':'ru,en;q=0.9',
+                 'content-type':'image/jpeg','User-Agent':'Mozilla/5.0'},
+        data=open(image_path,'rb')
+    )
     resp.raise_for_status()
     data = resp.json()
     cbir_id = data.get('cbir_id')
@@ -179,44 +186,33 @@ def search_by_image(image_path):
     if not cbir_id or not orig:
         return [], []
 
-    # 2) get HTML
+    # 2. Получаем страницу сайтов
     resp = requests.get(
-        YANDEX_SEARCH_URL,
-        params={
-            'cbir_id': cbir_id,
-            'cbir_page': 'sites',
-            'rpt': 'imageview',
-            'url': orig,
-        },
-        headers={'User-Agent': HEADERS_UPLOAD['User-Agent']}
+        'https://yandex.ru/images/search',
+        params={'cbir_id':cbir_id,'cbir_page':'sites','rpt':'imageview','url':orig},
+        headers={'accept':'text/html','accept-language':'ru,en;q=0.9',
+                 'User-Agent':'Mozilla/5.0'}
     )
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, 'html.parser')
 
+    # 3. Парсим ссылки
     links = []
-
-    # 3) JSON из data-state
-    root = soup.select_one('div.Root[data-state]')
-    if root:
-        raw = root['data-state']
-        # <<-- главное: раскодировать HTML-сущности!
-        raw = unescape(raw)
+    div = soup.select_one('div.Root[data-state]')
+    if div:
+        raw = unescape(div['data-state'])
         try:
-            state = json.loads(raw)
-            # чаще всего в state['sites'], но на всякий случай:
-            items = state.get('sites') or state.get('cbirSitesList', {}).get('sites') or []
+            st = json.loads(raw)
+            items = st.get('sites') or st.get('cbirSitesList', {}).get('sites') or []
             for it in items:
                 url = it.get('url') or it.get('link')
                 if url:
                     links.append(url)
-        except json.JSONDecodeError:
+        except:
             pass
-
-        # 4) regex-fallback: уже по “чистой” строке
         for url in re.findall(r'https?://[^\s"\'<>]+', raw):
             links.append(url)
 
-    # 5) HTML-фоллбэк (как было)
     for info in soup.select('.CbirSites-ItemInfo'):
         a = info.select_one('.CbirSites-ItemDomain a')
         url = a['href'] if a and a.has_attr('href') else None
@@ -226,25 +222,25 @@ def search_by_image(image_path):
         if url:
             links.append(url)
 
-    # 6) фильтрация и дедуп
+    # 4. Фильтрация и дедуп
+    SKIP = ['avatars.mds.yandex.net','yastatic.net','info-people.com',
+            'yandex.ru/support/images','passport.yandex.ru']
     clean = []
-    for l in links:
-        d = urlparse(l).netloc
-        if any(skip in d for skip in SKIP_DOMAINS):
-            continue
-        if re.search(r'\.(css|js|jpg|jpeg|png|webp|gif)(?:$|\?)', l.lower()):
-            continue
-        clean.append(l)
+    for u in links:
+        net = urlparse(u).netloc
+        if any(skip in net for skip in SKIP): continue
+        if re.search(r'\.(css|js|jpe?g|png|webp|gif)(?:$|\?)', u.lower()): continue
+        clean.append(u)
+    unique = list(dict.fromkeys(clean))
 
-    unique = []
-    seen = set()
-    for l in clean:
-        if l not in seen:
-            seen.add(l)
-            unique.append(l)
+    # 5. Маркетплейсы
+    MARKET = {'ozon.ru':'Ozon','megamarket.ru':'Megamarket',
+              'wildberries.ru':'Wb','wb.ru':'Wb',
+              'market.yandex.ru':'Yandex Market','market.ya.ru':'Yandex Market'}
+    market = [u for u in unique if any(urlparse(u).netloc.endswith(k) for k in MARKET)]
 
-    market = [l for l in unique if any(urlparse(l).netloc.endswith(k) for k in MARKET_DOMAINS)]
     return unique, market
+
 
 
 
