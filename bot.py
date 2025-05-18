@@ -166,66 +166,86 @@ def format_market_links(urls, page, total):
 # основная логика
 
 def search_by_image(image_path):
-    logger.debug("=== search_by_image ===")
+    import json
+    from html import unescape
+
     # 1) upload
-    logger.debug("Upload to Yandex")
     with open(image_path,'rb') as f:
-        r=requests.post(YANDEX_UPLOAD_URL, headers=HEADERS_UPLOAD, data=f)
-    r.raise_for_status(); data=r.json()
-    logger.debug(f"Upload JSON: {data}")
-    cbir_id=data.get('cbir_id'); orig=data.get('sizes',{}).get('orig',{}).get('path')
-    if not cbir_id or not orig: return [],[]
+        resp = requests.post(YANDEX_UPLOAD_URL, headers=HEADERS_UPLOAD, data=f)
+    resp.raise_for_status()
+    data = resp.json()
+    cbir_id = data.get('cbir_id')
+    orig = data.get('sizes', {}).get('orig', {}).get('path')
+    if not cbir_id or not orig:
+        return [], []
 
     # 2) get HTML
-    r=requests.get(YANDEX_SEARCH_URL, params={
-        'cbir_id':cbir_id,'cbir_page':'sites','rpt':'imageview','url':orig
-    }, headers={'User-Agent':HEADERS_UPLOAD['User-Agent']})
-    r.raise_for_status(); html=r.text
-    logger.debug(f"HTML len {len(html)}")
-    soup=BeautifulSoup(html,'html.parser')
+    resp = requests.get(
+        YANDEX_SEARCH_URL,
+        params={
+            'cbir_id': cbir_id,
+            'cbir_page': 'sites',
+            'rpt': 'imageview',
+            'url': orig,
+        },
+        headers={'User-Agent': HEADERS_UPLOAD['User-Agent']}
+    )
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, 'html.parser')
 
-    # 3) parse data-state
-    links=[]
-    root=soup.select_one('div.Root[data-state]')
+    links = []
+
+    # 3) JSON из data-state
+    root = soup.select_one('div.Root[data-state]')
     if root:
-        raw=root['data-state']
-        logger.debug(f"data-state len {len(raw)}")
-        # try JSON -> state['sites']
+        raw = root['data-state']
+        # <<-- главное: раскодировать HTML-сущности!
+        raw = unescape(raw)
         try:
-            state=json.loads(raw)
-            items= state.get('sites') or state.get('cbirSitesList',{}).get('sites') or []
-            logger.debug(f"Parsed JSON items {len(items)}")
+            state = json.loads(raw)
+            # чаще всего в state['sites'], но на всякий случай:
+            items = state.get('sites') or state.get('cbirSitesList', {}).get('sites') or []
             for it in items:
-                url=it.get('url') or it.get('link')
-                if url: links.append(url)
-        except Exception:
-            logger.debug("JSON parse failed, fallback regex")
-        # regex fallback to catch any URLs
-        found=re.findall(r'https?://[^"\\]+' , raw)
-        for url in found:
-            if url not in links:
-                links.append(url)
-    # 4) HTML fallback
-    for info in soup.select('.CbirSites-ItemInfo'):
-        a=info.select_one('.CbirSites-ItemDomain a')
-        url=a['href'] if a and a.has_attr('href') else None
-        if not url:
-            t=info.select_one('.CbirSites-ItemTitle a')
-            url=t['href'] if t and t.has_attr('href') else None
-        if url: links.append(url)
+                url = it.get('url') or it.get('link')
+                if url:
+                    links.append(url)
+        except json.JSONDecodeError:
+            pass
 
-    # 5) filter & dedupe
-    clean=[]
+        # 4) regex-fallback: уже по “чистой” строке
+        for url in re.findall(r'https?://[^\s"\'<>]+', raw):
+            links.append(url)
+
+    # 5) HTML-фоллбэк (как было)
+    for info in soup.select('.CbirSites-ItemInfo'):
+        a = info.select_one('.CbirSites-ItemDomain a')
+        url = a['href'] if a and a.has_attr('href') else None
+        if not url:
+            t = info.select_one('.CbirSites-ItemTitle a')
+            url = t['href'] if t and t.has_attr('href') else None
+        if url:
+            links.append(url)
+
+    # 6) фильтрация и дедуп
+    clean = []
     for l in links:
-        d=urlparse(l).netloc
-        if any(sd in d for sd in SKIP_DOMAINS): continue
-        if re.search(r'\.(css|js|jpg|jpeg|png|webp|gif)(?:$|\?)',l.lower()): continue
+        d = urlparse(l).netloc
+        if any(skip in d for skip in SKIP_DOMAINS):
+            continue
+        if re.search(r'\.(css|js|jpg|jpeg|png|webp|gif)(?:$|\?)', l.lower()):
+            continue
         clean.append(l)
-    unique=[]; seen=set()
+
+    unique = []
+    seen = set()
     for l in clean:
-        if l not in seen: seen.add(l); unique.append(l)
-    market=[l for l in unique if any(urlparse(l).netloc.endswith(k) for k in MARKET_DOMAINS)]
+        if l not in seen:
+            seen.add(l)
+            unique.append(l)
+
+    market = [l for l in unique if any(urlparse(l).netloc.endswith(k) for k in MARKET_DOMAINS)]
     return unique, market
+
 
 
 if __name__=='__main__':
