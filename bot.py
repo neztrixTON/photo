@@ -1,126 +1,171 @@
-import os
+#!/usr/bin/env python3
 import logging
+import tempfile
 import requests
+import re
+import json
+from urllib.parse import urlparse
 from bs4 import BeautifulSoup
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram import Update, InputFile
+from telegram.constants import ChatAction
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, CallbackContext,
+    filters
+)
 
-# Configure logging
+# Enable detailed logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Bot configuration
-BOT_TOKEN = '8037946874:AAFt8VjAfy-UpTXF-XoJUYPiNlC7B-btUms'  # Telegram bot token
-YANDEX_COOKIES = (
-    'yandexuid=8531756701727155871; yashr=2242844391727155871; yuidss=8531756701727155871; '
-    'ymex=2042515885.yrts.1727155885; gdpr=0; _ym_uid=1727155886351001819; '
-    'amcuid=6860060251727158513; font_loaded=YSv1; receive-cookie-deprecation=1; '
-    'my=YwA=; _ym_d=1737911848; _ymab_param=vUvJUBtmcqz2lDIYGWTAi2n64OEkb6rW-uUnUZCcAvitPKO_bqQ9DvxzAGk6qAgkZeyx-'
-    'hAlUyX9--0rkJr9kZWuEWs; yw_preset=base; skid=2774135661741329601; '
-    'L=XQgIclt1ZWkEcmFQc29Pak9eCH9FAH9nRAYgQCMdPywIKQdVEBAVIlAk.1745002492.16123.383150.a665eed8def1c7643a158335b3a9242e; '
-    'yandex_login=temur.hudaiberdiev; i=GWe6WqYzanWjDUtAiDJB8aLG+Nqxyf4EnZyHz/ogLbobk7FhUknmX0+QD'
-)
+# Telegram bot token
+BOT_TOKEN = '8037946874:AAFt8VjAfy-UpTXF-XoJUYPiNlC7B-btUms'
 
-# Headers for Yandex requests
-BASE_HEADERS = {
-    'Accept': '*/*',
-    'Content-Type': 'image/jpeg',
-    'Origin': 'https://yandex.ru',
-    'Referer': 'https://yandex.ru/images/',
-    'User-Agent': 'python-telegram-bot'
+# Yandex CBIR endpoints
+YANDEX_UPLOAD_URL = (
+    'https://yandex.ru/images-apphost/image-download'
+    '?cbird=111&images_avatars_size=preview&images_avatars_namespace=images-cbir'
+)
+YANDEX_SEARCH_URL = 'https://yandex.ru/images/search'
+
+# Filters
+SKIP_DOMAINS = [
+    'avatars.mds.yandex.net', 'yastatic.net', 'info-people.com',
+    'yandex.ru/support/images', 'passport.yandex.ru'
+]
+MARKET_DOMAINS = {
+    'ozon.ru': 'Ozon', 'megamarket.ru': 'Megamarket',
+    'wildberries.ru': 'Wildberries', 'wb.ru': 'Wildberries',
+    'market.yandex.ru': 'Yandex Market', 'market.ya.ru': 'Yandex Market'
 }
 
-CBIR_DOWNLOAD_URL = 'https://yandex.ru/images-apphost/image-download'
-CLCK_URL_TEMPLATE = (
-    'https://yandex.ru/clck/jclck/'
-    'dtype=iweb/path=8.228.1031.4065.1277.2958.2052/'
-    'vars=-page={page}/'
-    'table=imgs/service=cbir.yandex/ui=images.yandex/*{search_url}'
-)
+async def start(update: Update, context: CallbackContext):
+    await update.message.reply_text(
+        'Привет! Отправь мне картинку, и я найду сайты, где она встречалась.'
+    )
 
-def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    update.message.reply_text('Привет! Отправь мне фото, и я найду сайты, где оно встречалось.')
+async def handle_photo(update: Update, context: CallbackContext):
+    await context.bot.send_chat_action(
+        chat_id=update.effective_chat.id,
+        action=ChatAction.TYPING
+    )
 
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Download image bytes
-    file = await update.message.photo[-1].get_file()
-    img_bytes = await file.download_as_bytearray()
+    photo = await update.message.photo[-1].get_file()
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tf:
+        await photo.download_to_drive(tf.name)
+        image_path = tf.name
 
-    # Get cbir_id from Yandex
-    cbir_id = get_cbir_id(img_bytes)
-    if not cbir_id:
+    # Upload image and get cbir_id + orig
+    cbir_id, orig = get_cbir_id_and_orig(image_path)
+    if not cbir_id or not orig:
         await update.message.reply_text('Не удалось получить cbir_id от Yandex.')
         return
 
-    # Initial search URL
-    search_url = (
-        f'https://yandex.ru/images/search?cbir_id={cbir_id}'
-        '&rpt=imageview&url=&cbir_page=sites'
-    )
+    # Search by image
+    all_links, market_links = search_by_image(cbir_id, orig)
+    if not all_links:
+        await update.message.reply_text('По вашему изображению ссылки не найдены.')
+        return
 
-    # Fetch first page
-    html = fetch_search_page(search_url)
-    sites = parse_sites(html)
+    # Prepare message
+    text = 'Найденные сайты:\n'
+    for url in all_links:
+        text += f'- {url}\n'
 
-    if sites:
-        text = '\n'.join(f'{t}: {u}' for t, u in sites)
-    else:
-        text = 'Сайты не найдены.'
     await update.message.reply_text(text)
 
-# Upload image to Yandex, return cbir_id
+    # Optionally send marketplace separately
+    if market_links:
+        mtext = 'Маркетплейсы:\n' + '\n'.join(f'- {u}' for u in market_links)
+        await update.message.reply_text(mtext)
 
-def get_cbir_id(img_bytes: bytes) -> str:
-    headers = BASE_HEADERS.copy()
-    headers['Cookie'] = YANDEX_COOKIES
-    files = {'file': ('image.jpg', img_bytes, 'image/jpeg')}
-    params = {'images_avatars_size': 'preview', 'images_avatars_namespace': 'images-cbir'}
-    resp = requests.post(CBIR_DOWNLOAD_URL, headers=headers, params=params, files=files)
-    if resp.ok:
-        return resp.json().get('cbir_id', '')
-    logger.error('CBIR upload failed: %s', resp.text)
-    return ''
 
-# Regular page fetch
+def get_cbir_id_and_orig(image_path: str):
+    """
+    Загружает изображение в Yandex CBIR, возвращает (cbir_id, orig)
+    """
+    with open(image_path, 'rb') as f:
+        resp = requests.post(
+            YANDEX_UPLOAD_URL,
+            headers={
+                'Accept': '*/*',
+                'Accept-Language': 'ru,en;q=0.9',
+                'Content-Type': 'image/jpeg',
+                'User-Agent': 'Mozilla/5.0'
+            },
+            data=f
+        )
+    if resp.status_code != 200:
+        logger.error('Upload error %s: %s', resp.status_code, resp.text)
+        return None, None
 
-def fetch_search_page(url: str) -> str:
-    headers = {'User-Agent': BASE_HEADERS['User-Agent']}
-    resp = requests.get(url, headers=headers)
-    resp.raise_for_status()
-    return resp.text
+    try:
+        data = resp.json()
+    except json.JSONDecodeError:
+        logger.error('Invalid JSON in upload response')
+        return None, None
 
-# AJAX page fetch for pagination
+    cbir_id = data.get('cbir_id')
+    orig = data.get('sizes', {}).get('orig', {}).get('path')
+    return cbir_id, orig
 
-def fetch_ajax_page(base_url: str, page: int) -> str:
-    url = CLCK_URL_TEMPLATE.format(page=page, search_url=base_url)
-    headers = {'User-Agent': BASE_HEADERS['User-Agent'], 'Referer': base_url}
-    resp = requests.get(url, headers=headers)
-    resp.raise_for_status()
-    return resp.text
 
-# Parse sites from HTML
+def search_by_image(cbir_id: str, orig: str):
+    """
+    Выполняет поиск по изображению и возвращает все ссылки и маркетплейсы
+    """
+    params = {
+        'cbir_id': cbir_id,
+        'rpt': 'imageview',
+        'url': orig,
+        'cbir_page': 'sites'
+    }
+    resp = requests.get(YANDEX_SEARCH_URL, params=params, headers={
+        'Accept': 'text/html,application/xhtml+xml,*/*;q=0.9',
+        'Accept-Language': 'ru,en;q=0.9',
+        'User-Agent': 'Mozilla/5.0'
+    })
+    if resp.status_code != 200:
+        logger.error('Search error %s', resp.status_code)
+        return [], []
 
-def parse_sites(html: str):
-    soup = BeautifulSoup(html, 'html.parser')
-    items = soup.select('ul.CbirSites-Items li.CbirSites-Item')
-    results = []
-    for it in items:
-        a = it.select_one('.CbirSites-ItemTitle a')
-        if a:
-            title = a.text.strip()
-            href = a['href']
-            results.append((title, href))
-    return results
+    soup = BeautifulSoup(resp.text, 'html.parser')
+    links = []
+
+    # HTML parsing fallback
+    for info in soup.select('.CbirSites-ItemInfo'):
+        a_dom = info.select_one('.CbirSites-ItemDomain')
+        if a_dom and a_dom.has_attr('href'):
+            links.append(a_dom['href'])
+            continue
+        a_title = info.select_one('.CbirSites-ItemTitle a')
+        if a_title and a_title.has_attr('href'):
+            links.append(a_title['href'])
+
+    # Clean and dedupe
+    clean = []
+    for u in links:
+        nl = urlparse(u).netloc
+        if any(skip in nl for skip in SKIP_DOMAINS):
+            continue
+        if re.search(r'\.(css|js|jpe?g|png|webp|gif)(?:$|\?)', u.lower()):
+            continue
+        clean.append(u)
+    unique = list(dict.fromkeys(clean))
+
+    # Market
+    market = [u for u in unique if any(urlparse(u).netloc.endswith(dom) for dom in MARKET_DOMAINS)]
+    return unique, market
 
 
 def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler('start', start))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.run_polling()
+
 
 if __name__ == '__main__':
     main()
