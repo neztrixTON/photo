@@ -4,6 +4,7 @@ import requests
 import re
 import io
 import json
+import pandas as pd
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 from telegram import (
@@ -21,7 +22,6 @@ from telegram.ext import (
     ContextTypes,
     CommandHandler,
 )
-from html import unescape
 
 # Enable logging
 logging.basicConfig(
@@ -103,6 +103,20 @@ async def display_links(update, context):
     else:
         await update.message.reply_text(text, reply_markup=keyboard, disable_web_page_preview=True, parse_mode=ParseMode.HTML)
 
+async def save_excel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.UPLOAD_DOCUMENT)
+    all_links = context.user_data.get('all_links', [])
+    market_links = context.user_data.get('market_links', [])
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+        pd.DataFrame({'Ссылка': all_links}).to_excel(writer, index=False, sheet_name='Общие результаты')
+        pd.DataFrame({'Ссылка': market_links}).to_excel(writer, index=False, sheet_name='Маркетплейсы')
+    buffer.seek(0)
+    await update.callback_query.message.reply_document(
+        document=InputFile(buffer, filename='results.xlsx'),
+        caption='Файл Excel с результатами'
+    )
+    await update.callback_query.answer()
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = update.callback_query.data
@@ -113,6 +127,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         key = f'page_{mode}'
         context.user_data[key] += 1 if data=='next' else -1
     elif data=='save_excel':
+        await save_excel(update, context)
         return
     await display_links(update, context)
 
@@ -149,7 +164,6 @@ def format_market_links(urls, page, total):
         name = next((label for key, label in MARKET_DOMAINS.items() if domain.endswith(key)), domain)
         lines.append(f"{i}. 🔗 <a href=\"{url}\">Ссылка {i}</a> ({name})")
     return header + "\n".join(lines)
-
 
 
 def search_by_image(image_path):
@@ -206,8 +220,10 @@ def search_by_image(image_path):
 
     return unique, market
 
+
+
 def main():
-    application = Application.builder().token('8074669890:AAGvN67WC5BeAOLsJYTNVzuiipbwwUi8KRU').build()
+    application = Application.builder().token('8037946874:AAFt8VjAfy-UpTXF-XoJUYPiNlC7B-btUms').build()
     application.add_handler(CommandHandler('start', start))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     application.add_handler(CallbackQueryHandler(button_callback))
