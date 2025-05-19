@@ -51,6 +51,10 @@ SKIP_DOMAINS = [
     'info-people.com',
     'yandex.ru/support/images',
     'passport.yandex.ru',
+    'https://yandex.ru/tune/search/',
+    'https://yandex.ru/images-apphost',
+    'https://yandex.ru/support/images/troubleshooting.html',
+    'https://yandex.ru/support/images/',
 ]
 # Marketplace domains (keys for endswith matching)
 MARKET_DOMAINS = {
