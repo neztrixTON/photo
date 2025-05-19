@@ -51,11 +51,17 @@ SKIP_DOMAINS = [
     'info-people.com',
     'yandex.ru/support/images',
     'passport.yandex.ru',
-    'https://yandex.ru/tune/search/',
-    'https://yandex.ru/images-apphost',
-    'https://yandex.ru/support/images/troubleshooting.html',
-    'https://yandex.ru/support/images/',
 ]
+
+
+SKIP_URLS = [
+  'https://yandex.ru/tune/search/',
+  'https://yandex.ru/images-apphost',
+  'https://yandex.ru/support/images/troubleshooting.html',
+  'https://yandex.ru/support/images/',
+]
+
+
 # Marketplace domains (keys for endswith matching)
 MARKET_DOMAINS = {
     'ozon.ru': 'Ozon',
@@ -171,12 +177,7 @@ def format_market_links(urls, page, total):
 
 
 def search_by_image(image_path):
-    import requests
-    from bs4 import BeautifulSoup
-    from urllib.parse import urlparse
-    import re
-
-    # 1. Загрузка картинки
+    # 1. Загрузка изображения
     with open(image_path, 'rb') as f:
         resp = requests.post(YANDEX_UPLOAD_URL, headers=HEADERS_UPLOAD, data=f)
     resp.raise_for_status()
@@ -186,7 +187,7 @@ def search_by_image(image_path):
     if not cbir_id or not orig:
         return [], []
 
-    # 2. Получаем HTML страницу
+    # 2. Получаем HTML
     params = {
         'cbir_id': cbir_id,
         'cbir_page': 'sites',
@@ -198,20 +199,27 @@ def search_by_image(image_path):
     resp.raise_for_status()
     html = resp.text
 
-    # 3. Извлекаем ВСЕ ссылки из строки вида: &quot;https://example.com&quot;
+    # 3. Ищем все ссылки вида &quot;https://...&quot;
     raw_links = re.findall(r'&quot;(https?://[^"&<>]+)&quot;', html)
 
-    # 4. Фильтрация от мусора
+    # 4. Фильтрация
     links = []
     for link in raw_links:
+        # Убираем по точному совпадению
+        if link.strip() in SKIP_URLS:
+            continue
+
         domain = urlparse(link).netloc
         if any(skip in domain for skip in SKIP_DOMAINS):
             continue
+
+        # Убираем ссылки на картинки и скрипты
         if re.search(r'\.(css|js|jpe?g|png|gif|webp)(\?|$)', link.lower()):
             continue
+
         links.append(link)
 
-    # 5. Убираем дубли
+    # 5. Убираем дубликаты
     seen = set()
     unique = []
     for l in links:
@@ -219,11 +227,10 @@ def search_by_image(image_path):
             seen.add(l)
             unique.append(l)
 
-    # 6. Отдельно собираем ссылки на маркетплейсы
+    # 6. Выделяем маркетплейсы
     market = [l for l in unique if any(urlparse(l).netloc.endswith(key) for key in MARKET_DOMAINS)]
 
     return unique, market
-
 
 
 def main():
