@@ -290,7 +290,7 @@ def search_by_image(image_path):
 
 
 def main():
-    application = Application.builder().token('8037946874:AAFt8VjAfy-UpTXF-XoJUYPiNlC7B-btUms').build()
+    application = Application.builder().token('Bot-token').build()
     application.add_handler(CommandHandler('start', start))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     application.add_handler(CallbackQueryHandler(button_callback))
